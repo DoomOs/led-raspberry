@@ -3,6 +3,7 @@ import paho.mqtt.client as mqtt
 import ssl
 import threading
 import json
+import os
 
 app = Flask(__name__)
 
@@ -18,7 +19,7 @@ MQTT_PASSWORD = "User1234"    # <- tus credenciales HiveMQ
 led_state = False
 sensor_data = {"heart_rate": "N/A", "timestamp": None, "led_state": None}
 
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
         print("✅ Conectado a MQTT desde Flask")
         client.subscribe(MQTT_TOPIC_DATA)
@@ -37,7 +38,7 @@ def on_message(client, userdata, msg):
 
 def mqtt_subscribe():
     """Hilo en segundo plano para escuchar datos del sensor"""
-    client = mqtt.Client()
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
     context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
     client.tls_set_context(context)
@@ -45,25 +46,39 @@ def mqtt_subscribe():
     client.on_connect = on_connect
     client.on_message = on_message
 
-    client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    client.loop_forever()
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_forever()
+    except Exception as e:
+        print(f"❌ Error en hilo MQTT subscribe: {e}")
 
-# Hilo para MQTT
-mqtt_thread = threading.Thread(target=mqtt_subscribe)
-mqtt_thread.daemon = True
-mqtt_thread.start()
+# Cliente MQTT global para publicar
+mqtt_pub_client = None
 
-# Cliente MQTT global en Flask
-mqtt_pub_client = mqtt.Client()
-mqtt_pub_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-mqtt_pub_client.tls_set_context(context)
-mqtt_pub_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-mqtt_pub_client.loop_start()   # 🔑 importante
+def init_mqtt_publisher():
+    """Inicializar cliente MQTT para publicar"""
+    global mqtt_pub_client
+    try:
+        mqtt_pub_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        mqtt_pub_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        mqtt_pub_client.tls_set_context(context)
+        mqtt_pub_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        mqtt_pub_client.loop_start()   # 🔑 importante
+        print("✅ Cliente MQTT publisher inicializado")
+    except Exception as e:
+        print(f"❌ Error inicializando MQTT publisher: {e}")
 
 def publish_mqtt(message):
-    mqtt_pub_client.publish(MQTT_TOPIC_LED, message)
-    print(f"📤 Mensaje publicado: {message}")
+    """Publicar mensaje MQTT para el LED"""
+    if mqtt_pub_client:
+        try:
+            result = mqtt_pub_client.publish(MQTT_TOPIC_LED, message)
+            print(f"📤 Mensaje publicado: {message} (rc: {result.rc})")
+        except Exception as e:
+            print(f"❌ Error publicando mensaje: {e}")
+    else:
+        print("❌ Cliente MQTT publisher no inicializado")
 
 @app.route("/")
 def index():
@@ -77,5 +92,15 @@ def toggle_led():
     publish_mqtt(message)
     return redirect(url_for("index"))
 
+# Inicializar MQTT publisher
+init_mqtt_publisher()
+
+# Hilo para MQTT subscriber
+mqtt_thread = threading.Thread(target=mqtt_subscribe)
+mqtt_thread.daemon = True
+mqtt_thread.start()
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Configuración para Render.com
+    port = int(os.environ.get("PORT", 5000))  # Render define PORT
+    app.run(host="0.0.0.0", port=port, debug=False)
